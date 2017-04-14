@@ -26,6 +26,8 @@ import sys
 import threading
 import traceback
 
+sys.path.insert(0,'..')
+
 import paramiko
 from paramiko.py3compat import b, u, decodebytes
 
@@ -57,7 +59,7 @@ class Server (paramiko.ServerInterface):
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_auth_password(self, username, password):
-        if (username == 'robey') and (password == 'foo'):
+        if (username == 'dima') and (password == '123456'):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
@@ -66,7 +68,7 @@ class Server (paramiko.ServerInterface):
         if (username == 'robey') and (key == self.good_pub_key):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
-    
+
     def check_auth_gssapi_with_mic(self, username,
                                    gss_authenticated=paramiko.AUTH_FAILED,
                                    cc_file=None):
@@ -136,7 +138,7 @@ except Exception as e:
 print('Got a connection!')
 
 try:
-    t = paramiko.Transport(client, gss_kex=DoGSSAPIKeyExchange)
+    t = paramiko.Transport(client) #, gss_kex=DoGSSAPIKeyExchange)
     t.set_gss_host(socket.getfqdn(""))
     try:
         t.load_server_moduli()
@@ -156,9 +158,9 @@ try:
     if chan is None:
         print('*** No channel.')
         sys.exit(1)
-    print('Authenticated!')
+    print('Authenticated!!!')
 
-    server.event.wait(10)
+    server.event.wait(1000)
     if not server.event.is_set():
         print('*** Client never asked for a shell.')
         sys.exit(1)
@@ -169,6 +171,7 @@ try:
     chan.send('Username: ')
     f = chan.makefile('rU')
     username = f.readline().strip('\r\n')
+    print "Got Username: " + username
     chan.send('\r\nI don\'t like you, ' + username + '.\r\n')
     chan.close()
 
@@ -180,4 +183,3 @@ except Exception as e:
     except:
         pass
     sys.exit(1)
-

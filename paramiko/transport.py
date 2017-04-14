@@ -22,6 +22,7 @@ Core protocol implementation
 """
 
 from __future__ import print_function
+import hexdump
 import os
 import socket
 import sys
@@ -100,6 +101,7 @@ class Transport (threading.Thread, ClosingContextManager):
     # These tuples of algorithm identifiers are in preference order; do not
     # reorder without reason!
     _preferred_ciphers = (
+#        'none',
         'aes128-ctr',
         'aes192-ctr',
         'aes256-ctr',
@@ -134,6 +136,12 @@ class Transport (threading.Thread, ClosingContextManager):
     _cipher_info = {
         'aes128-ctr': {
             'class': algorithms.AES,
+            'mode': modes.CTR,
+            'block-size': 16,
+            'key-size': 16
+        },
+        'none': {
+            'class': None,
             'mode': modes.CTR,
             'block-size': 16,
             'key-size': 16
@@ -237,7 +245,8 @@ class Transport (threading.Thread, ClosingContextManager):
                  default_window_size=DEFAULT_WINDOW_SIZE,
                  default_max_packet_size=DEFAULT_MAX_PACKET_SIZE,
                  gss_kex=False,
-                 gss_deleg_creds=True):
+                 gss_deleg_creds=True,
+                 resume=False):
         """
         Create a new SSH session over an existing socket, or socket-like
         object.  This only creates the `.Transport` object; it doesn't begin the
@@ -284,6 +293,7 @@ class Transport (threading.Thread, ClosingContextManager):
         """
         self.active = False
         self._sshclient = None
+        self._resume = resume
 
         if isinstance(sock, string_types):
             # convert "host:port" into (host, port)
@@ -382,8 +392,8 @@ class Transport (threading.Thread, ClosingContextManager):
         self.auth_handler = None
         self.global_response = None     # response Message from an arbitrary global request
         self.completion_event = None    # user-defined event callbacks
-        self.banner_timeout = 15        # how long (seconds) to wait for the SSH banner
-        self.handshake_timeout = 15     # how long (seconds) to wait for the handshake to finish after SSH banner sent.
+        self.banner_timeout = 1500        # how long (seconds) to wait for the SSH banner
+        self.handshake_timeout = 1500     # how long (seconds) to wait for the handshake to finish after SSH banner sent.
 
 
         # server mode:
@@ -829,7 +839,7 @@ class Transport (threading.Thread, ClosingContextManager):
         self._send_user_message(m)
         start_ts = time.time()
         while True:
-            event.wait(0.1)
+            event.wait(10)
             if not self.active:
                 e = self.get_exception()
                 if e is None:
@@ -1661,6 +1671,8 @@ class Transport (threading.Thread, ClosingContextManager):
         return out[:nbytes]
 
     def _get_cipher(self, name, key, iv, operation):
+        if name == 'none':
+            return None
         if name not in self._cipher_info:
             raise SSHException('Unknown client cipher ' + name)
         if name in ('arcfour128', 'arcfour256'):
@@ -1744,19 +1756,22 @@ class Transport (threading.Thread, ClosingContextManager):
             self._log(DEBUG, 'starting thread (client mode): %s' % hex(long(id(self)) & xffffffff))
         try:
             try:
-                self.packetizer.write_all(b(self.local_version + '\r\n'))
-                self._log(DEBUG, 'Local version/idstring: %s' % self.local_version)
-                self._check_banner()
-                # The above is actually very much part of the handshake, but
-                # sometimes the banner can be read but the machine is not
-                # responding, for example when the remote ssh daemon is loaded
-                # in to memory but we can not read from the disk/spawn a new
-                # shell.
-                # Make sure we can specify a timeout for the initial handshake.
-                # Re-use the banner timeout for now.
-                self.packetizer.start_handshake(self.handshake_timeout)
-                self._send_kex_init()
-                self._expect_packet(MSG_KEXINIT)
+                if not self._resume:
+                    self.packetizer.write_all(b(self.local_version + '\r\n'))
+                    self._log(DEBUG, 'Local version/idstring: %s' % self.local_version)
+                    self._check_banner()
+                    # The above is actually very much part of the handshake, but
+                    # sometimes the banner can be read but the machine is not
+                    # responding, for example when the remote ssh daemon is loaded
+                    # in to memory but we can not read from the disk/spawn a new
+                    # shell.
+                    # Make sure we can specify a timeout for the initial handshake.
+                    # Re-use the banner timeout for now.
+                    self.packetizer.start_handshake(self.handshake_timeout)
+                    self._send_kex_init()
+                    self._expect_packet(MSG_KEXINIT)
+                else:
+                    self.completion_event.set()
 
                 while self.active:
                     if self.packetizer.need_rekey() and not self.in_kex:
@@ -1810,8 +1825,8 @@ class Transport (threading.Thread, ClosingContextManager):
                 self._log(ERROR, util.tb_strings())
                 self.saved_exception = e
             except EOFError as e:
-                self._log(DEBUG, 'EOF in transport thread')
-                #self._log(DEBUG, util.tb_strings())
+                self._log(DEBUG, 'EOF in transport thread: ' + str(e))
+                self._log(DEBUG, util.tb_strings())
                 self.saved_exception = e
             except socket.error as e:
                 if type(e.args) is tuple:
@@ -1868,6 +1883,7 @@ class Transport (threading.Thread, ClosingContextManager):
     ###  protocol stages
 
     def _negotiate_keys(self, m):
+        self._log(DEBUG, 'negotiate_keys')
         # throws SSHException on anything unusual
         self.clear_to_send_lock.acquire()
         try:
@@ -1877,6 +1893,7 @@ class Transport (threading.Thread, ClosingContextManager):
         if self.local_kex_init is None:
             # remote side wants to renegotiate
             self._send_kex_init()
+        self.kex_init_received_msg = m
         self._parse_kex_init(m)
         self.kex_engine.start_kex()
 
@@ -1963,6 +1980,7 @@ class Transport (threading.Thread, ClosingContextManager):
         self._send_message(m)
 
     def _parse_kex_init(self, m):
+        self.kex_data = m.get_remainder()
         cookie = m.get_bytes(16)
         kex_algo_list = m.get_list()
         server_key_algo_list = m.get_list()
@@ -1977,7 +1995,7 @@ class Transport (threading.Thread, ClosingContextManager):
         kex_follows = m.get_boolean()
         unused = m.get_int()
 
-        self._log(DEBUG, 'kex algos:' + str(kex_algo_list) + ' server key:' + str(server_key_algo_list) +
+        self._log(DEBUG, 'kEx algos:' + str(kex_algo_list) + ' server key:' + str(server_key_algo_list) +
                   ' client encrypt:' + str(client_encrypt_algo_list) +
                   ' server encrypt:' + str(server_encrypt_algo_list) +
                   ' client mac:' + str(client_mac_algo_list) +
@@ -2102,7 +2120,9 @@ class Transport (threading.Thread, ClosingContextManager):
         """switch on newly negotiated encryption parameters for outbound traffic"""
         m = Message()
         m.add_byte(cMSG_NEWKEYS)
-        self._send_message(m)
+        if not self._resume:
+            self._log(DEBUG, 'Sending MSG_NEWKEYS')
+            self._send_message(m)
         block_size = self._cipher_info[self.local_cipher]['block-size']
         if self.server_mode:
             IV_out = self._compute_key('B', block_size)
@@ -2110,6 +2130,8 @@ class Transport (threading.Thread, ClosingContextManager):
         else:
             IV_out = self._compute_key('A', block_size)
             key_out = self._compute_key('C', self._cipher_info[self.local_cipher]['key-size'])
+            self.IV_out = IV_out
+            self.key_out = key_out
         engine = self._get_cipher(self.local_cipher, key_out, IV_out, self._ENCRYPT)
         mac_size = self._mac_info[self.local_mac]['size']
         mac_engine = self._mac_info[self.local_mac]['class']
@@ -2128,7 +2150,8 @@ class Transport (threading.Thread, ClosingContextManager):
         if not self.packetizer.need_rekey():
             self.in_kex = False
         # we always expect to receive NEWKEYS now
-        self._expect_packet(MSG_NEWKEYS)
+        if not self._resume:
+            self._expect_packet(MSG_NEWKEYS)
 
     def _auth_trigger(self):
         self.authenticated = True
@@ -2147,7 +2170,7 @@ class Transport (threading.Thread, ClosingContextManager):
         self._activate_inbound()
         # can also free a bunch of stuff here
         self.local_kex_init = self.remote_kex_init = None
-        self.K = None
+#        self.K = None
         self.kex_engine = None
         if self.server_mode and (self.auth_handler is None):
             # create auth handler for server mode

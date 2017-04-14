@@ -22,12 +22,19 @@
 import base64
 from binascii import hexlify
 import getpass
+import hexdump
+import logging
+import pdb
+import pickle
 import os
 import select
 import socket
 import sys
 import time
 import traceback
+
+sys.path.insert(0,'..')
+
 from paramiko.py3compat import input
 
 import paramiko
@@ -42,12 +49,12 @@ def agent_auth(transport, username):
     Attempt to authenticate to the given transport using any of the private
     keys available from an SSH agent.
     """
-    
+
     agent = paramiko.Agent()
     agent_keys = agent.get_keys()
     if len(agent_keys) == 0:
         return
-        
+
     for key in agent_keys:
         print('Trying ssh-agent key %s' % hexlify(key.get_fingerprint()))
         try:
@@ -60,7 +67,7 @@ def agent_auth(transport, username):
 
 def manual_auth(username, hostname):
     default_auth = 'p'
-    auth = input('Auth by (p)assword, (r)sa key, or (d)ss key? [%s] ' % default_auth)
+    auth = 'p' # input('Auth by (p)assword, (r)sa key, or (d)ss key? [%s] ' % default_auth)
     if len(auth) == 0:
         auth = default_auth
 
@@ -87,14 +94,15 @@ def manual_auth(username, hostname):
             key = paramiko.DSSKey.from_private_key_file(path, password)
         t.auth_publickey(username, key)
     else:
-        pw = getpass.getpass('Password for %s@%s: ' % (username, hostname))
+        pw = '123456'  #getpass.getpass('Password for %s@%s: ' % (username, hostname))
+        print  "Authenticating with %s:%s" % (username, pw)
         t.auth_password(username, pw)
 
 
 # setup logging
 paramiko.util.log_to_file('demo.log')
 
-username = ''
+username = 'dima'
 if len(sys.argv) > 1:
     hostname = sys.argv[1]
     if hostname.find('@') >= 0:
@@ -119,9 +127,12 @@ except Exception as e:
     sys.exit(1)
 
 try:
+    print "Before Transport"
     t = paramiko.Transport(sock)
+    print "After Transport"
     try:
         t.start_client()
+        print "After start_client"
     except paramiko.SSHException:
         print('*** SSH negotiation failed.')
         sys.exit(1)
@@ -143,7 +154,6 @@ try:
         print('*** WARNING: Unknown host key!')
     elif keys[hostname][key.get_name()] != key:
         print('*** WARNING: Host key has changed!!!')
-        sys.exit(1)
     else:
         print('*** Host key OK.')
 
@@ -154,18 +164,45 @@ try:
         if len(username) == 0:
             username = default_username
 
-    agent_auth(t, username)
-    if not t.is_authenticated():
-        manual_auth(username, hostname)
+#    agent_auth(t, username)
+#    if not t.is_authenticated():
+    manual_auth(username, hostname)
     if not t.is_authenticated():
         print('*** Authentication failed. :(')
         t.close()
         sys.exit(1)
 
+
+
+    print('*** Authenticated OK!\n')
+
+    print "Outbound Key:" + hexdump.dump(t.key_out) + ", IV:"  + hexdump.dump(t.IV_out)
+
+    print "REKEYING...."
+
+    t._send_kex_init()
+
+    while t.in_kex:
+        print("Waiting for KEX to complete...")
+        time.sleep(1)
+
+    pickle.dump( t.K, open( "K.p", "wb" ) )
+    pickle.dump( t.H, open( "H.p", "wb" ) )
+    pickle.dump( t.session_id, open( "SESSIONID.p", "wb" ) )
+    pickle.dump( t.packetizer._sequence_number_out, open( "seqout.p", "wb" ) )
+    pickle.dump( t.packetizer._sequence_number_in, open( "seqin.p", "wb" ) )
+    open("kexM.p", "wb").write(t.kex_data)
+
+    print "Outbound Key:" + hexdump.dump(t.key_out) + ", IV:"  + hexdump.dump(t.IV_out)
+    out = t.packetizer._Packetizer__block_engine_out.update("ABCDEFG")
+    print "Encryption of 'ABCDEFG':" + hexdump.dump(out)
+
+    sys.exit(1)
+
     chan = t.open_session()
     chan.get_pty()
     chan.invoke_shell()
-    print('*** Here we go!\n')
+
     interactive.interactive_shell(chan)
     chan.close()
     t.close()
@@ -178,5 +215,3 @@ except Exception as e:
     except:
         pass
     sys.exit(1)
-
-

@@ -61,7 +61,7 @@ class Packetizer (object):
         self.__socket = socket
         self.__logger = None
         self.__closed = False
-        self.__dump_packets = False
+        self.__dump_packets = True
         self.__need_rekey = False
         self.__init_count = 0
         self.__remainder = bytes()
@@ -88,8 +88,8 @@ class Packetizer (object):
         self.__mac_key_in = bytes()
         self.__compress_engine_out = None
         self.__compress_engine_in = None
-        self.__sequence_number_out = 0
-        self.__sequence_number_in = 0
+        self._sequence_number_out = 0
+        self._sequence_number_in = 0
 
         # lock around outbound writes (packet computation)
         self.__write_lock = threading.RLock()
@@ -362,9 +362,9 @@ class Packetizer (object):
                 out = packet
             # + mac
             if self.__block_engine_out is not None:
-                payload = struct.pack('>I', self.__sequence_number_out) + packet
+                payload = struct.pack('>I', self._sequence_number_out) + packet
                 out += compute_hmac(self.__mac_key_out, payload, self.__mac_engine_out)[:self.__mac_size_out]
-            self.__sequence_number_out = (self.__sequence_number_out + 1) & xffffffff
+            self._sequence_number_out = (self._sequence_number_out + 1) & xffffffff
             self.write_all(out)
 
             self.__sent_bytes += len(out)
@@ -398,7 +398,7 @@ class Packetizer (object):
         # length field)
         leftover = header[4:]
         if (packet_size - len(leftover)) % self.__block_size_in != 0:
-            raise SSHException('Invalid packet blocking')
+            raise SSHException('Invalid packet blocking, expected block size: ' + str(self.__block_size_in))
         buf = self.read_all(packet_size + self.__mac_size_in - len(leftover))
         packet = buf[:packet_size - len(leftover)]
         post_packet = buf[packet_size - len(leftover):]
@@ -410,7 +410,7 @@ class Packetizer (object):
 
         if self.__mac_size_in > 0:
             mac = post_packet[:self.__mac_size_in]
-            mac_payload = struct.pack('>II', self.__sequence_number_in, packet_size) + packet
+            mac_payload = struct.pack('>II', self._sequence_number_in, packet_size) + packet
             my_mac = compute_hmac(self.__mac_key_in, mac_payload, self.__mac_engine_in)[:self.__mac_size_in]
             if not util.constant_time_bytes_eq(my_mac, mac):
                 raise SSHException('Mismatched MAC')
@@ -424,8 +424,8 @@ class Packetizer (object):
             payload = self.__compress_engine_in(payload)
 
         msg = Message(payload[1:])
-        msg.seqno = self.__sequence_number_in
-        self.__sequence_number_in = (self.__sequence_number_in + 1) & xffffffff
+        msg.seqno = self._sequence_number_in
+        self._sequence_number_in = (self._sequence_number_in + 1) & xffffffff
 
         # check for rekey
         raw_packet_size = packet_size + self.__mac_size_in + 4
